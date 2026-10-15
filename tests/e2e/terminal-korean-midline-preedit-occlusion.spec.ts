@@ -1,21 +1,10 @@
 /**
- * Headless end-to-end coverage for #12545: a mid-line Korean composition must not swallow the
- * character after the cursor.
+ * Headless end-to-end coverage for mid-line Korean composition.
  *
- * The preedit overlay is an opaque, absolutely-positioned box over the grid, so every cell its
- * bounding rect covers is unreadable while the composition is open. That gives the invariant
- * asserted here — **the overlay renders every committed cell it covers** — and it is the one the
- * bug broke: the box covered `하` and drew only `가`. It is measured from the overlay's real rect
- * against the real cell grid, which is what makes it an on-screen assertion rather than a
- * `textContent` one; a DOM emulator reports every rect as zero and cannot see the difference.
- *
- * Reference terminal implementations do not settle this by geometry. Two mature ones compose marked
- * text into the grid rather than into a floating box, and both still blank the cells under it — so
- * moving off the overlay would not fix the report. Rendering the covered tail is what does.
- *
- * Composition is driven through CDP `Input.imeSetComposition`, so this runs in the normal headless
- * project with no native input source. The row is written straight to the emulator because the
- * defect is in what the overlay draws over the buffer, not in anything reaching the pty.
+ * The preedit overlay covers only the composing span. Committed text remains in the terminal
+ * buffer and stays in its original cells, including Claude's task prompt shown under `/tasks`.
+ * Composition is driven through CDP `Input.imeSetComposition`, so this runs without a native input
+ * source; the row is written straight to the emulator because the defect is in the overlay layer.
  */
 import type { Page } from '@stablyai/playwright-test'
 import { expect, test } from './helpers/orca-app'
@@ -57,24 +46,14 @@ function describeOcclusion(sample: MidlinePreeditOcclusionSample): string {
   return `covers ${JSON.stringify(sample.hiddenByOverlay)} / renders ${JSON.stringify(sample.overlayText)}`
 }
 
-/**
- * The invariant, stated so it survives a different cell width: every committed cell the overlay
- * covers must appear in what it draws. How MANY cells it covers is a function of the runner's
- * font metrics — 34.4px over an 8.43px grid spans four columns where an 8px grid spans two — so
- * asserting the covered text verbatim pins the machine, not the behaviour.
- */
-function rendersEverythingItCovers(sample: MidlinePreeditOcclusionSample): boolean {
-  return sample.overlayText.includes(sample.hiddenByOverlay)
-}
-
 test.describe('Terminal mid-line Korean preedit occlusion', () => {
-  test('masks a semantically owned Codex placeholder during its first Korean preedit', async ({
+  test('overlays only preedit width over the Claude task prompt', async ({
     orcaPage
   }, testInfo) => {
     const arena = await openTerminalImePaneArena(orcaPage)
     let completed = false
     try {
-      const placeholder = 'Ask Codex to do anything'
+      const placeholder = 'describe a task for a new session'
       await writeToActiveTerminal(
         orcaPage,
         [
@@ -86,29 +65,25 @@ test.describe('Terminal mid-line Korean preedit occlusion', () => {
       await setImeComposition(arena.session, '아')
 
       const sample = await sampleOpenComposition(orcaPage, '아')
-      expect(sample.cursorColumn, 'the cursor is not after the Codex prompt').toBe(2)
-      expect(sample.rowTailFromCursor, 'the Codex placeholder is not under the cursor').toBe(
-        placeholder
-      )
-      expect(
-        sample.hiddenByOverlay,
-        `the opaque overlay does not mask the full placeholder — ${describeOcclusion(sample)}`
-      ).toBe(placeholder)
-      expect(sample.overlayText, 'the Codex placeholder is repeated after the preedit').toBe('아')
-      expect(sample.remainderText, 'the hidden span lost the placeholder width').toBe(placeholder)
-      expect(sample.remainderVisibility, 'the Codex placeholder is still painted').toBe('hidden')
+      expect(sample.cursorColumn, 'the cursor is not after the task prompt').toBe(2)
+      expect(sample.rowTailFromCursor, 'the task prompt is not under the cursor').toBe(placeholder)
+      expect(sample.overlayText).toBe('아')
+      expect(sample.remainderText).toBeNull()
+      expect(sample.preeditRect).not.toBeNull()
+      expect(sample.overlayRect.width).toBeLessThanOrEqual(sample.preeditRect!.width + 1)
+      expect(sample.hiddenByOverlay.length).toBeLessThan(placeholder.length)
       completed = true
     } finally {
       await closeTerminalImePaneArena(
         arena,
         testInfo,
-        'korean-codex-placeholder-preedit',
+        'claude-task-placeholder-preedit',
         !completed
       )
     }
   })
 
-  test('renders the row tail it covers, so the character after the cursor stays readable', async ({
+  test('covers only preedit width while keeping committed row text in place', async ({
     orcaPage
   }, testInfo) => {
     const arena = await openTerminalImePaneArena(orcaPage)
@@ -126,17 +101,14 @@ test.describe('Terminal mid-line Korean preedit occlusion', () => {
         null
       )
 
-      // The load-bearing assertion, and the only one that reads the overlay's geometry against the
-      // grid: an opaque box that covers committed cells has to reproduce them, or the user loses
-      // text for the length of the composition.
-      expect(
-        sample.hiddenByOverlay.length,
-        `the overlay covers no committed text, so there is nothing to assert — ${describeOcclusion(sample)}`
-      ).toBeGreaterThan(0)
-      expect(
-        rendersEverythingItCovers(sample),
-        `the preedit overlay must render every committed cell it covers — ${describeOcclusion(sample)} ${JSON.stringify(sample)}`
-      ).toBe(true)
+      expect(sample.overlayText).toBe('가')
+      expect(sample.remainderText).toBeNull()
+      expect(sample.preeditRect).not.toBeNull()
+      expect(sample.overlayRect.width).toBeLessThanOrEqual(sample.preeditRect!.width + 1)
+      expect(sample.overlayRect.left).toBeCloseTo(
+        sample.screenRect.left + sample.cursorColumn * sample.cellWidth,
+        0
+      )
       completed = true
     } finally {
       await closeTerminalImePaneArena(
